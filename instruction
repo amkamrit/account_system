@@ -1,0 +1,2 @@
+1. Change Database Username and Passoword in helpers/Init.php
+2. Change Database Name in helpers/initview/index.php in  "<option>" value tag.

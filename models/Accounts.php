@@ -1,0 +1,252 @@
+<?php
+namespace app\models;
+use Yii;
+
+	class Accounts
+	{
+			var $id = 0;
+			var $name = '';
+			var $code = '';
+
+			var $g_parent_id = 0;		/* Group specific */
+			var $g_affects_gross = 0;	/* Group specific */
+			var $l_group_id = 0;		/* Ledger specific */
+			var $l_type = 0;		/* Ledger specific */
+			var $l_reconciliation = 0;	/* Ledger specific */
+			var $l_notes = '';		/* Ledger specific */
+
+			var $op_total = 0;
+			var $op_total_dc = 'D';
+			var $dr_total = 0;
+			var $cr_total = 0;
+			var $cl_total = 0;
+			var $cl_total_dc = 'D';
+
+			var $children_groups = array();
+			var $children_ledgers = array();
+
+			var $counter = 0;
+
+			var $only_opening = false;
+			var $start_date = null;
+			var $end_date = null;
+			var $affects_gross = -1;
+
+			/*var $Group = null;
+			var $Ledger = null;*/
+
+	function start($id)
+	{
+		if ($id == 0)
+		{
+			$this->id = NULL;
+			$this->name = "None";
+		} else {
+			$group = Groups::findOne($id);
+			$this->id = $group->id;
+			$this->name = $group->name;
+			$this->code = $group->code;
+			$this->g_parent_id = $group->parent_id;
+			$this->g_affects_gross = $group->affects_gross;
+		}
+		$this->op_total = 0;
+		$this->op_total_dc = 'D';
+		$this->dr_total = 0;
+		$this->cr_total = 0;
+		$this->cl_total = 0;
+		$this->cl_total_dc = 'D';
+
+		/* If affects_gross set, add sub-ledgers to only affects_gross == 0 */
+		if ($this->affects_gross == 1) {
+			/* Skip adding sub-ledgers if affects_gross is set and value == 1 */
+		} else if ($this->affects_gross == 0) {
+			/* Add sub-ledgers if affects_gross is set and value == 0 */
+			$this->add_sub_ledgers();
+		} else {
+			/* Add sub-ledgers if affects_gross is not set == -1 */
+			$this->add_sub_ledgers();
+		}
+
+		$this->add_sub_groups();
+	}
+
+/**
+ * Find and add subgroups as objects
+ */
+	function add_sub_groups()
+	{
+		//$conditions = array('Group.parent_id' => $this->id);
+		/* If primary group sort by id else sort by name */
+		if ($this->id == NULL) {
+			$child_group_q = Groups::find()->where(['parent_id'=>NULL])->all();
+		} 
+		else 
+		{
+			if ($this->affects_gross == 0) 
+			{
+				$child_group_q = Groups::find()->where('parent_id=:id AND affects_gross=:ag',[':id'=>$this->id,':ag'=>0])->all();
+			}
+			else if ($this->affects_gross == 1) {
+				$child_group_q = Groups::find()->where('parent_id=:id AND affects_gross=:ag',[':id'=>$this->id,':ag'=>1])->all();
+			}
+			else
+			{
+				$child_group_q = Groups::find()->where('parent_id=:id',[':id'=>$this->id])->all();
+			}
+			
+		}
+		$this->affects_gross = -1;
+
+		$counter = 0;
+		foreach ($child_group_q as $row)
+		{
+			/* Create new AccountList object */
+			$this->children_groups[$counter] = new Accounts();
+
+			/* Initial setup */
+			$this->children_groups[$counter]->Group = new Groups();
+			$this->children_groups[$counter]->Ledger = new Ledgers();
+			$this->children_groups[$counter]->only_opening = $this->only_opening;
+			$this->children_groups[$counter]->start_date = $this->start_date;
+			$this->children_groups[$counter]->end_date = $this->end_date;
+			$this->children_groups[$counter]->affects_gross = -1; /* No longer needed in sub groups */
+
+			$this->children_groups[$counter]->start($row->id);
+
+
+			/** Calculating Current Opening Balance of Group */
+			$cob = Yii::$app->Accounts->currentClosingBalance(
+				$this->op_total,
+				$this->op_total_dc,
+				$this->children_groups[$counter]->op_total,
+				$this->children_groups[$counter]->op_total_dc
+				);
+
+			$this->op_total = $cob['amount'];
+			$this->op_total_dc = $cob['amount_dc'];
+
+			/* Calculating current group closing balance total */
+			$ccb = Yii::$app->Accounts->currentClosingBalance(
+				$this->cl_total,
+				$this->cl_total_dc,
+				$this->children_groups[$counter]->cl_total,
+				$this->children_groups[$counter]->cl_total_dc
+				);
+
+			$this->cl_total = $ccb['amount'];
+			$this->cl_total_dc = $ccb['amount_dc'];
+		
+
+			// Calculate Dr and Cr total 
+			$this->dr_total = Yii::$app->Accounts->currentDcBalance($this->dr_total, $this->children_groups[$counter]->dr_total);
+			$this->cr_total =  Yii::$app->Accounts->currentDcBalance($this->cr_total, $this->children_groups[$counter]->cr_total);
+
+			$counter++;
+		}
+	}
+
+/**
+ * Find and add subledgers as array items
+ */
+	function add_sub_ledgers()
+	{
+		$child_ledger_q = Ledgers::find()->where('group_id=:group_id',[':group_id'=>$this->id])->all();
+		
+		$counter = 0;
+		foreach ($child_ledger_q as $row)
+		{
+			$this->children_ledgers[$counter]['id'] = $row->id;
+			$this->children_ledgers[$counter]['name'] = $row->name;
+			$this->children_ledgers[$counter]['code'] = $row->code;
+			$this->children_ledgers[$counter]['l_group_id'] = $row->group_id;
+			$this->children_ledgers[$counter]['l_type'] = $row->type;
+			$this->children_ledgers[$counter]['l_reconciliation'] = $row->reconciliation;
+			$this->children_ledgers[$counter]['l_notes'] = $row->notes;
+
+			/* If start date is specified dont use the opening balance since its not applicable */
+			if (is_null($this->start_date)) {
+				$this->children_ledgers[$counter]['op_total'] = $row->op_balance;
+				$this->children_ledgers[$counter]['op_total_dc'] =$row->op_balance_dc;
+			} else {
+				$this->children_ledgers[$counter]['op_total'] = 0.00;
+				$this->children_ledgers[$counter]['op_total_dc'] = $row->op_balance_dc;
+			}
+
+			/* Calculating current group opening balance total */
+		/*	$temp3 = calculate_withdc(
+				$this->op_total,
+				$this->op_total_dc,
+				$this->children_ledgers[$counter]['op_total'],
+				$this->children_ledgers[$counter]['op_total_dc']
+			);*/
+			/*$this->op_total ='6';
+			$this->op_total_dc = 'cd';*/
+			$cob = Yii::$app->Accounts->currentClosingBalance(
+				$this->op_total,
+				$this->op_total_dc,
+				$this->children_ledgers[$counter]['op_total'],
+				$this->children_ledgers[$counter]['op_total_dc']
+				);
+
+			$this->op_total = $cob['amount'];
+			$this->op_total_dc = $cob['amount_dc'];
+
+
+			if ($this->only_opening == true) {
+				/* If calculating only opening balance */
+				$this->children_ledgers[$counter]['dr_total'] = 0;
+				$this->children_ledgers[$counter]['cr_total'] = 0;
+
+				$this->children_ledgers[$counter]['cl_total'] =
+					$this->children_ledgers[$counter]['op_total'];
+				$this->children_ledgers[$counter]['cl_total_dc'] =
+					$this->children_ledgers[$counter]['op_total_dc'];
+			} else {
+				$closing_balance = Yii::$app->Accounts->closingBalance(
+					$row->id,
+					$this->start_date,
+					$this->end_date
+				);
+
+				$this->children_ledgers[$counter]['dr_total'] = $closing_balance['dr_total'];
+				$this->children_ledgers[$counter]['cr_total'] = $closing_balance['cr_total'];
+
+				$this->children_ledgers[$counter]['cl_total'] = $closing_balance['cl_total'];
+				$this->children_ledgers[$counter]['cl_total_dc'] =$closing_balance['cl_total_dc'];
+				$this->children_ledgers[$counter]['op_total'] = $closing_balance['op_total'];
+				$this->children_ledgers[$counter]['op_total_dc'] =$closing_balance['op_total_dc'];
+			}
+
+
+			/* Calculating current group closing balance total */
+			$ccb = Yii::$app->Accounts->currentClosingBalance(
+				$this->cl_total,
+				$this->cl_total_dc,
+				$this->children_ledgers[$counter]['cl_total'],
+				$this->children_ledgers[$counter]['cl_total_dc']
+				);
+
+			$this->cl_total = $ccb['amount'];
+			$this->cl_total_dc = $ccb['amount_dc'];
+
+			// Calculate Dr and Cr total 
+			$this->dr_total = Yii::$app->Accounts->currentDcBalance($this->dr_total, $this->children_ledgers[$counter]['dr_total']);
+			$this->cr_total =  Yii::$app->Accounts->currentDcBalance($this->cr_total, $this->children_ledgers[$counter]['cr_total']);
+
+			$counter++;
+		}
+	}
+
+
+	
+
+
+
+
+	}
+
+
+
+
+
+?>
